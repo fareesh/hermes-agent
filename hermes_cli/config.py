@@ -504,6 +504,10 @@ def _ensure_hermes_home_managed(home: Path):
 
 DEFAULT_CONFIG = {
     "model": "",
+    "model_policy": {
+        "enabled": False,
+        "rules": [],
+    },
     "providers": {},
     "fallback_providers": [],
     "credential_pool_strategies": {},
@@ -1459,6 +1463,19 @@ DEFAULT_CONFIG = {
         # false.  TUI has its own modal overlay (HERMES_TUI_NO_CONFIRM=1 to
         # opt out there).
         "destructive_slash_confirm": True,
+    },
+
+    # Optional deterministic per-tool policy gate. Disabled by default so
+    # existing tool behavior is unchanged unless a power user opts in.
+    "tool_policy": {
+        "enabled": False,
+        "default_decision": "allow",  # allow | ask | deny | defer
+        "unknown_tools": "allow",     # allow | ask | deny | defer
+        # Tools with mature internal approval flows can be skipped by the
+        # generic policy unless an explicit rule matches them, avoiding double
+        # approval prompts. Terminal already has dangerous-command approval.
+        "protected_by_existing_approval": ["terminal"],
+        "rules": [],
     },
 
     # Permanently allowed dangerous command patterns (added via "always" approval)
@@ -3357,7 +3374,7 @@ def check_config_version() -> Tuple[int, int]:
 
 # Fields that are valid at root level of config.yaml
 _KNOWN_ROOT_KEYS = {
-    "_config_version", "model", "providers", "fallback_model",
+    "_config_version", "model", "model_policy", "tool_policy", "providers", "fallback_model",
     "fallback_providers", "credential_pool_strategies", "toolsets",
     "agent", "terminal", "display", "compression", "delegation",
     "auxiliary", "custom_providers", "context", "memory", "gateway",
@@ -3502,6 +3519,138 @@ def validate_config_structure(config: Optional[Dict[str, Any]] = None) -> List["
             "fallback_model appears inside custom_providers instead of at root level",
             "Move fallback_model to the top level of config.yaml (no indentation)",
         ))
+
+    # ── model_policy: optional power-user per-turn routing ───────────────
+    mp = config.get("model_policy")
+    if mp is not None:
+        if not isinstance(mp, dict):
+            issues.append(ConfigIssue(
+                "warning",
+                f"model_policy should be a dict, got {type(mp).__name__}",
+                "Use: model_policy: {enabled: false, rules: []}",
+            ))
+        else:
+            rules = mp.get("rules", [])
+            if rules is not None and not isinstance(rules, list):
+                issues.append(ConfigIssue(
+                    "warning",
+                    f"model_policy.rules should be a list, got {type(rules).__name__}",
+                    "Each rule should be a '- name: ...' list item",
+                ))
+            elif isinstance(rules, list):
+                valid_predicates = {
+                    "platform", "chat_type", "channel_id", "channel_id_regex",
+                    "channel_name", "channel_name_regex", "thread_id", "thread_id_regex",
+                    "user_id", "user_id_regex", "user_name", "user_name_regex",
+                    "message_regex", "cwd_regex", "has_image", "min_history_messages",
+                }
+                for i, rule in enumerate(rules):
+                    if not isinstance(rule, dict):
+                        issues.append(ConfigIssue(
+                            "warning",
+                            f"model_policy.rules[{i}] should be a dict, got {type(rule).__name__}",
+                            "Each rule needs at least: when: {...}, use: {provider: ..., model: ...}",
+                        ))
+                        continue
+                    scope = rule.get("scope")
+                    if scope is not None and str(scope).strip().lower() not in {"session", "turn"}:
+                        issues.append(ConfigIssue(
+                            "warning",
+                            f"model_policy.rules[{i}].scope should be 'session' or 'turn'",
+                            "Omit scope for the default session boundary, or set scope: turn for explicit per-turn cost routing",
+                        ))
+                    on_unavailable = rule.get("on_unavailable")
+                    if on_unavailable is not None and str(on_unavailable).strip().lower() not in {"error", "skip"}:
+                        issues.append(ConfigIssue(
+                            "warning",
+                            f"model_policy.rules[{i}].on_unavailable should be 'error' or 'skip'",
+                            "Omit it for defaults: session rules fail closed, turn rules skip unavailable providers",
+                        ))
+                    when = rule.get("when")
+                    if not isinstance(when, dict):
+                        issues.append(ConfigIssue(
+                            "warning",
+                            f"model_policy.rules[{i}].when should be a dict",
+                            "Add predicates such as platform: email or channel_name_regex: '^alerts$'",
+                        ))
+                    else:
+                        unknown = sorted(k for k in when if k not in valid_predicates)
+                        if unknown:
+                            issues.append(ConfigIssue(
+                                "warning",
+                                f"model_policy.rules[{i}].when has unknown predicate(s): {unknown}",
+                                "Rules with unknown predicates will not match; check the key names",
+                            ))
+                    use = rule.get("use")
+                    if not isinstance(use, dict):
+                        issues.append(ConfigIssue(
+                            "warning",
+                            f"model_policy.rules[{i}].use should be a dict",
+                            "Add: use: {provider: openrouter, model: google/gemini-3-flash-preview}",
+                        ))
+                    else:
+                        if not use.get("provider"):
+                            issues.append(ConfigIssue(
+                                "warning",
+                                f"model_policy.rules[{i}].use is missing 'provider'",
+                                "Add: provider: openrouter (or another configured provider)",
+                            ))
+                        if not use.get("model"):
+                            issues.append(ConfigIssue(
+                                "warning",
+                                f"model_policy.rules[{i}].use is missing 'model'",
+                                "Add: model: <model-name>",
+                            ))
+
+    # ── tool_policy: optional power-user per-tool consent gate ───────────
+    tp = config.get("tool_policy")
+    if tp is not None:
+        if not isinstance(tp, dict):
+            issues.append(ConfigIssue(
+                "warning",
+                f"tool_policy should be a dict, got {type(tp).__name__}",
+                "Use: tool_policy: {enabled: false, rules: []}",
+            ))
+        else:
+            valid_decisions = {"allow", "ask", "deny", "defer"}
+            for key in ("default_decision", "unknown_tools"):
+                value = tp.get(key)
+                if value is not None and str(value).strip().lower() not in valid_decisions:
+                    issues.append(ConfigIssue(
+                        "warning",
+                        f"tool_policy.{key} should be one of {sorted(valid_decisions)}",
+                        "Use allow, ask, deny, or defer.",
+                    ))
+            rules = tp.get("rules", [])
+            if rules is not None and not isinstance(rules, list):
+                issues.append(ConfigIssue(
+                    "warning",
+                    f"tool_policy.rules should be a list, got {type(rules).__name__}",
+                    "Each rule should be a '- name: ...' list item",
+                ))
+            elif isinstance(rules, list):
+                for i, rule in enumerate(rules):
+                    if not isinstance(rule, dict):
+                        issues.append(ConfigIssue(
+                            "warning",
+                            f"tool_policy.rules[{i}] should be a dict, got {type(rule).__name__}",
+                            "Each rule needs selectors such as tools/capability and decision: ask",
+                        ))
+                        continue
+                    decision = rule.get("decision", rule.get("action"))
+                    if decision is not None and str(decision).strip().lower() not in valid_decisions:
+                        issues.append(ConfigIssue(
+                            "warning",
+                            f"tool_policy.rules[{i}].decision should be one of {sorted(valid_decisions)}",
+                            "Use allow, ask, deny, or defer.",
+                        ))
+                    when = rule.get("when")
+                    if when is not None and not isinstance(when, dict):
+                        issues.append(ConfigIssue(
+                            "warning",
+                            f"tool_policy.rules[{i}].when should be a dict",
+                            "Example: when: {path: {regex: '(^|/)\\.env$'}}",
+                        ))
 
     # ── model section: should exist when custom_providers is configured ──
     model_cfg = config.get("model")

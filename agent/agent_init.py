@@ -556,6 +556,10 @@ def init_agent(
     # commentary when the provider later returns it as a completed interim
     # assistant message.
     agent._current_streamed_assistant_text = ""
+    agent._model_policy_active = False
+    agent._model_policy_rule = None
+    agent._model_policy_scope = None
+    agent._model_policy_default_runtime = None
 
     # Optional current-turn user-message override used when the API-facing
     # user message intentionally differs from the persisted transcript
@@ -1631,6 +1635,7 @@ def init_agent(
             "anthropic_base_url": agent._anthropic_base_url,
             "is_anthropic_oauth": agent._is_anthropic_oauth,
         })
+    agent._model_policy_default_runtime = dict(agent._primary_runtime)
 
 
 

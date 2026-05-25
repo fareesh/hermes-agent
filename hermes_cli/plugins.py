@@ -1647,6 +1647,21 @@ def get_pre_tool_call_block_message(
         fmt = getattr(_thread_tool_whitelist, "fmt", "Tool '{tool_name}' denied")
         return fmt.format(tool_name=tool_name)
 
+    try:
+        from tools.tool_policy import enforce_tool_policy
+
+        policy_block = enforce_tool_policy(
+            tool_name,
+            args if isinstance(args, dict) else {},
+            task_id=task_id,
+            session_id=session_id,
+            tool_call_id=tool_call_id,
+        )
+        if policy_block is not None:
+            return policy_block
+    except Exception as exc:
+        logger.debug("tool_policy evaluation failed: %s", exc)
+
     hook_results = invoke_hook(
         "pre_tool_call",
         tool_name=tool_name,

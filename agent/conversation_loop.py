@@ -292,6 +292,25 @@ def run_conversation(
     # Installed once, transparent when streams are healthy, prevents crash on write.
     _install_safe_stdio()
 
+    # Restore fallback state first, then apply optional per-turn model policy
+    # before the session row/log context sees this turn's active model.
+    agent._restore_primary_runtime()
+    try:
+        from hermes_cli.config import load_config as _load_config
+        from agent.model_policy import apply_policy_for_turn
+
+        _policy_cfg = _load_config()
+        _policy_result = apply_policy_for_turn(agent, _policy_cfg, user_message, conversation_history)
+        if getattr(_policy_result, "blocked", False):
+            return {
+                "final_response": _policy_result.message,
+                "messages": list(conversation_history or []),
+                "error": _policy_result.message,
+                "blocked_by": "model_policy",
+            }
+    except Exception as exc:
+        logger.warning("model_policy evaluation failed: %s", exc)
+
     agent._ensure_db_session()
 
     # Tell auxiliary_client what the live main provider/model are for
@@ -321,11 +340,6 @@ def run_conversation(
     # so the foreground value here does not leak into it.
     from tools.skill_provenance import set_current_write_origin
     set_current_write_origin(getattr(agent, "_memory_write_origin", "assistant_tool"))
-
-    # If the previous turn activated fallback, restore the primary
-    # runtime so this turn gets a fresh attempt with the preferred model.
-    # No-op when _fallback_activated is False (gateway, first turn, etc.).
-    agent._restore_primary_runtime()
 
     # Sanitize surrogate characters from user input.  Clipboard paste from
     # rich-text editors (Google Docs, Word, etc.) can inject lone surrogates

@@ -109,6 +109,7 @@ SECTIONS: list[tuple[str, list[tuple[str, str, str | None]]]] = [
         ("user-guide/features/api-server", "API Server", None),
         ("user-guide/features/honcho", "Honcho Memory", None),
         ("user-guide/features/provider-routing", "Provider Routing", None),
+        ("user-guide/features/model-policy", "Model Policy Routing", None),
         ("user-guide/features/fallback-providers", "Fallback Providers", None),
         ("user-guide/features/credential-pools", "Credential Pools", None),
     ]),

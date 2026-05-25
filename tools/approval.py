@@ -868,6 +868,208 @@ def _get_cron_approval_mode() -> str:
         return "deny"
 
 
+def request_user_approval(subject: str, description: str, policy_key: str,
+                          *, policy_keys: list[str] | None = None,
+                          allow_permanent: bool = False,
+                          approval_callback=None,
+                          surface_label: str = "tool_policy") -> dict:
+    """Request approval for a generic policy-gated action.
+
+    This reuses the existing CLI/gateway approval transport used by dangerous
+    commands, but accepts a generic *subject* (for example, a tool-call preview)
+    instead of a shell command. It returns ``{"approved": bool, "message": str}``.
+    """
+    keys = list(policy_keys or [policy_key])
+    session_key = get_current_session_key()
+
+    if is_approved(session_key, policy_key):
+        return {"approved": True, "message": None, "session_approved": True}
+
+    is_cli = env_var_enabled("HERMES_INTERACTIVE")
+    is_gateway = _is_gateway_approval_context()
+    is_ask = env_var_enabled("HERMES_EXEC_ASK")
+
+    if is_truthy_value(os.getenv("HERMES_YOLO_MODE")) or is_current_session_yolo_enabled():
+        return {"approved": True, "message": None, "yolo_approved": True}
+
+    if not is_cli and not is_gateway and not is_ask:
+        return {
+            "approved": False,
+            "message": (
+                f"BLOCKED: Approval required by {surface_label} ({description}), "
+                "but no interactive approval surface is available."
+            ),
+            "pattern_key": policy_key,
+            "description": description,
+            "user_consent": False,
+        }
+
+    if is_gateway or is_ask:
+        notify_cb = None
+        with _lock:
+            notify_cb = _gateway_notify_cbs.get(session_key)
+
+        if notify_cb is None:
+            return {
+                "approved": False,
+                "message": (
+                    f"BLOCKED: Approval required by {surface_label} ({description}), "
+                    "but no gateway approval callback is registered."
+                ),
+                "pattern_key": policy_key,
+                "description": description,
+                "user_consent": False,
+            }
+
+        approval_data = {
+            "command": subject,
+            "pattern_key": policy_key,
+            "pattern_keys": keys,
+            "description": description,
+        }
+        entry = _ApprovalEntry(approval_data)
+        with _lock:
+            _gateway_queues.setdefault(session_key, []).append(entry)
+
+        _fire_approval_hook(
+            "pre_approval_request",
+            command=subject,
+            description=description,
+            pattern_key=policy_key,
+            pattern_keys=list(keys),
+            session_key=session_key,
+            surface="gateway",
+        )
+
+        try:
+            notify_cb(approval_data)
+        except Exception as exc:
+            logger.warning("Gateway approval notify failed: %s", exc)
+            with _lock:
+                queue = _gateway_queues.get(session_key, [])
+                if entry in queue:
+                    queue.remove(entry)
+                if not queue:
+                    _gateway_queues.pop(session_key, None)
+            return {
+                "approved": False,
+                "message": "BLOCKED: Failed to send approval request to user. Do NOT retry.",
+                "pattern_key": policy_key,
+                "description": description,
+                "user_consent": False,
+            }
+
+        timeout = _get_approval_config().get("gateway_timeout", 300)
+        try:
+            timeout = int(timeout)
+        except (ValueError, TypeError):
+            timeout = 300
+
+        deadline = time.monotonic() + max(timeout, 0)
+        resolved = False
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            if entry.event.wait(timeout=min(1.0, remaining)):
+                resolved = True
+                break
+
+        with _lock:
+            queue = _gateway_queues.get(session_key, [])
+            if entry in queue:
+                queue.remove(entry)
+            if not queue:
+                _gateway_queues.pop(session_key, None)
+
+        choice = entry.result
+        outcome = "timeout" if not resolved else (choice if choice else "timeout")
+        _fire_approval_hook(
+            "post_approval_response",
+            command=subject,
+            description=description,
+            pattern_key=policy_key,
+            pattern_keys=list(keys),
+            session_key=session_key,
+            surface="gateway",
+            choice=outcome,
+        )
+
+        if not resolved or choice is None or choice == "deny":
+            reason = "timed out without user response" if not resolved else "denied by user"
+            return {
+                "approved": False,
+                "message": (
+                    f"BLOCKED: Action {reason}. The user has NOT consented "
+                    "to this policy-gated tool call. Do NOT retry the same "
+                    "action without user input."
+                ),
+                "pattern_key": policy_key,
+                "description": description,
+                "outcome": "timeout" if not resolved else "denied",
+                "user_consent": False,
+            }
+
+        for key in keys:
+            if choice == "session":
+                approve_session(session_key, key)
+            elif choice == "always" and allow_permanent:
+                approve_session(session_key, key)
+                approve_permanent(key)
+                save_permanent_allowlist(_permanent_approved)
+
+        return {"approved": True, "message": None, "user_approved": True, "description": description}
+
+    _fire_approval_hook(
+        "pre_approval_request",
+        command=subject,
+        description=description,
+        pattern_key=policy_key,
+        pattern_keys=list(keys),
+        session_key=session_key,
+        surface="cli",
+    )
+    choice = prompt_dangerous_approval(
+        subject,
+        description,
+        allow_permanent=allow_permanent,
+        approval_callback=approval_callback,
+    )
+    _fire_approval_hook(
+        "post_approval_response",
+        command=subject,
+        description=description,
+        pattern_key=policy_key,
+        pattern_keys=list(keys),
+        session_key=session_key,
+        surface="cli",
+        choice=choice,
+    )
+
+    if choice == "deny":
+        return {
+            "approved": False,
+            "message": (
+                "BLOCKED: User denied this policy-gated tool call. The user "
+                "has NOT consented to this action. Do NOT retry without user input."
+            ),
+            "pattern_key": policy_key,
+            "description": description,
+            "outcome": "denied",
+            "user_consent": False,
+        }
+
+    for key in keys:
+        if choice == "session":
+            approve_session(session_key, key)
+        elif choice == "always" and allow_permanent:
+            approve_session(session_key, key)
+            approve_permanent(key)
+            save_permanent_allowlist(_permanent_approved)
+
+    return {"approved": True, "message": None, "user_approved": True, "description": description}
+
+
 def _smart_approve(command: str, description: str) -> str:
     """Use the auxiliary LLM to assess risk and decide approval.
 
