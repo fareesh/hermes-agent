@@ -161,6 +161,62 @@ class TestMiniMaxAnthropicWire:
         assert agent._anthropic_prompt_cache_policy() == (False, False)
 
 
+class TestKimiMoonshotAnthropicWire:
+    """Kimi / Moonshot on its Anthropic-compatible /coding endpoint.
+
+    Live-verified against a paid Kimi Code Plan account: cache_control
+    markers are respected and cache_read_input_tokens is non-zero on
+    the second turn, proving the cache layer is real on this backend
+    (clacky-ai/openclacky@5a46b6d).
+    """
+
+    def test_kimi_coding_plan_on_anthropic_wire_caches(self):
+        agent = _make_agent(
+            provider="kimi-coding",
+            base_url="https://api.kimi.com/coding",
+            api_mode="anthropic_messages",
+            model="kimi-k2.5",
+        )
+        assert agent._anthropic_prompt_cache_policy() == (True, True)
+
+    def test_kimi_on_moonshot_host_anthropic_wire_caches(self):
+        agent = _make_agent(
+            provider="custom",
+            base_url="https://moonshot.ai/anthropic",
+            api_mode="anthropic_messages",
+            model="kimi-k2.5",
+        )
+        assert agent._anthropic_prompt_cache_policy() == (True, True)
+
+    def test_kimi_on_moonshot_cn_host_anthropic_wire_caches(self):
+        agent = _make_agent(
+            provider="custom",
+            base_url="https://moonshot.cn/anthropic",
+            api_mode="anthropic_messages",
+            model="kimi-k2.5",
+        )
+        assert agent._anthropic_prompt_cache_policy() == (True, True)
+
+    def test_kimi_on_chat_completions_does_not_cache(self):
+        """Chat-completions transport — no cache_control on OpenAI wire."""
+        agent = _make_agent(
+            provider="kimi-coding",
+            base_url="https://api.moonshot.ai/v1",
+            api_mode="chat_completions",
+            model="kimi-k2.5",
+        )
+        assert agent._anthropic_prompt_cache_policy() == (False, False)
+
+    def test_kimi_cn_provider_on_anthropic_wire_caches(self):
+        agent = _make_agent(
+            provider="kimi-coding-cn",
+            base_url="https://api.moonshot.cn/v1",
+            api_mode="anthropic_messages",
+            model="kimi-k2.5",
+        )
+        assert agent._anthropic_prompt_cache_policy() == (True, True)
+
+
 class TestOpenAIWireFormatOnCustomProvider:
     """A custom provider using chat_completions (OpenAI wire) should NOT get caching."""
 

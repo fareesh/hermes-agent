@@ -143,6 +143,10 @@ def _get_backend() -> str:
     if configured in {"parallel", "firecrawl", "tavily", "exa", "searxng", "brave-free", "ddgs", "xai"}:
         return configured
 
+    # Plugin-provided backend (e.g. webclaw) — accept it if registered.
+    if configured and _is_registered_plugin_backend(configured):
+        return configured
+
     # Fallback for manual / legacy config — pick the highest-priority
     # available backend. Firecrawl also counts as available when the managed
     # tool gateway is configured for Nous subscribers.
@@ -228,7 +232,18 @@ def _is_backend_available(backend: str) -> bool:
             return has_xai_credentials()
         except Exception:
             return False
-    return False
+    # Plugin-provided backend — check via provider registry
+    return _is_registered_plugin_backend(backend)
+
+
+def _is_registered_plugin_backend(backend: str) -> bool:
+    """Check if a backend name is registered in the web search provider registry."""
+    try:
+        from agent.web_search_registry import get_provider
+        provider = get_provider(backend)
+        return provider is not None and bool(provider.is_available())
+    except Exception:
+        return False
 
 
 def _ddgs_package_importable() -> bool:

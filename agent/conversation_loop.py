@@ -1093,9 +1093,26 @@ def run_conversation(
                 except Exception:
                     pass  # Never let rate guard break the agent loop
 
+            # Detect tool-call re-entry: if the last assistant message
+            # (before trailing tool results) has tool_calls, the model
+            # is just choosing the next tool — deep thinking is unnecessary
+            # and burns quota on hidden reasoning tokens.
+            _is_tool_reentry = False
+            if api_call_count > 1:
+                for _m in reversed(messages):
+                    if _m.get("role") == "assistant":
+                        if _m.get("tool_calls"):
+                            _is_tool_reentry = True
+                        break
+            _saved_reasoning_config = agent.reasoning_config
+            if _is_tool_reentry:
+                agent.reasoning_config = {"enabled": False}
+
             try:
                 agent._reset_stream_delivery_tracking()
                 api_kwargs = agent._build_api_kwargs(api_messages)
+                if _is_tool_reentry:
+                    agent.reasoning_config = _saved_reasoning_config
                 if agent._force_ascii_payload:
                     _sanitize_structure_non_ascii(api_kwargs)
                 if agent.api_mode == "codex_responses":
