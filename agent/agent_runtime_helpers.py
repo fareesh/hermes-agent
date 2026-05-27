@@ -1212,6 +1212,20 @@ def anthropic_prompt_cache_policy(
         if is_minimax_provider or is_minimax_host:
             return True, True
 
+        # Kimi / Moonshot on its Anthropic-compatible /coding endpoint
+        # speaks the same Anthropic Messages protocol and respects
+        # cache_control markers.  Live-verified against a paid Kimi
+        # Code Plan account: cache_read_input_tokens is non-zero on
+        # the second turn, proving the cache layer is real on this
+        # backend (clacky-ai/openclacky@5a46b6d).
+        is_kimi_provider = provider_lower in {"kimi-coding", "kimi-coding-cn"}
+        is_kimi_host = any(
+            base_url_host_matches(eff_base_url, host)
+            for host in ("api.kimi.com", "moonshot.ai", "moonshot.cn")
+        )
+        if is_kimi_provider or is_kimi_host:
+            return True, True
+
     # Qwen/Alibaba on OpenCode (Zen/Go) and native DashScope: OpenAI-wire
     # transport that accepts Anthropic-style cache_control markers and
     # rewards them with real cache hits.  Without this branch
